@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use bevy::{
-    input::mouse::{MouseMotion, MouseWheel},
+    input::mouse::MouseWheel,
     prelude::*,
 };
 
@@ -29,6 +29,7 @@ impl Plugin for ScrollViewPlugin {
                     input_mouse_pressed_move,
                     input_touch_pressed_move,
                     scroll_events,
+                    fling_update,
                     scroll_update,
                 )
                     .chain(),
@@ -42,12 +43,18 @@ pub struct ScrollView {
     /// Field which control speed of the scrolling.
     /// Could be negative number to implement invert scroll
     pub scroll_speed: f32,
+    pub old_mouse_y: Option<f32>,
+    pub velocity: f32,
+    pub max_scroll: f32,
 }
 
 impl Default for ScrollView {
     fn default() -> Self {
         Self {
             scroll_speed: 200.0,
+            old_mouse_y: None,
+            velocity: 0.0,
+            max_scroll: 0.0,
         }
     }
 }
@@ -74,22 +81,32 @@ pub fn create_scroll_view(
 }
 
 fn input_mouse_pressed_move(
-    mut motion_evr: EventReader<MouseMotion>,
-    mut q: Query<(&Children, &Interaction, &Node), With<ScrollView>>,
+    mut q: Query<(&Children, &Interaction, &Node, &mut ScrollView)>,
     mut content_q: Query<(&mut ScrollableContent, &Node)>,
+    windows: Query<&mut Window>,
+    time: Res<Time>,
 ) {
-    for evt in motion_evr.read() {
-        for (children, &interaction, node) in q.iter_mut() {
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+    if let Some(pos) = window.cursor_position() {
+        for (children, &interaction, node, mut view) in q.iter_mut() {
             if interaction != Interaction::Pressed {
+                view.old_mouse_y = None;
                 continue;
             }
-            let container_height = node.size().y;
+            let delta = if let Some(old_y) = view.old_mouse_y {
+                pos.y - old_y
+            } else {
+                0.0
+            };
+            view.old_mouse_y = Some(pos.y);
+            view.velocity = (view.velocity + delta / time.delta_seconds()) / 2.0;
+            view.max_scroll = 0.0;
+            // iterate children and find the bottom of the last one
             for &child in children.iter() {
                 if let Ok(item) = content_q.get_mut(child) {
-                    let mut scroll = item.0;
-                    let max_scroll = (item.1.size().y - container_height).max(0.0);
-                    scroll.pos_y += evt.delta.y;
-                    scroll.pos_y = scroll.pos_y.clamp(-max_scroll, 0.);
+                    view.max_scroll = view.max_scroll.min(-(item.1.size().y - node.size().y).max(0.0));
                 }
             }
         }
@@ -98,25 +115,24 @@ fn input_mouse_pressed_move(
 
 fn input_touch_pressed_move(
     touches: Res<Touches>,
-    mut q: Query<(&Children, &Interaction, &Node), With<ScrollView>>,
+    mut q: Query<(&Children, &Interaction, &Node, &mut ScrollView)>,
     mut content_q: Query<(&mut ScrollableContent, &Node)>,
+    time: Res<Time>,
 ) {
     for t in touches.iter() {
         let Some(touch) = touches.get_pressed(t.id()) else {
             continue;
         };
 
-        for (children, &interaction, node) in q.iter_mut() {
+        for (children, &interaction, node, mut view) in q.iter_mut() {
             if interaction != Interaction::Pressed {
                 continue;
             }
-            let container_height = node.size().y;
+            view.velocity = (view.velocity + touch.delta().y / time.delta_seconds()) / 2.0;
+            view.max_scroll = 0.0;
             for &child in children.iter() {
                 if let Ok(item) = content_q.get_mut(child) {
-                    let mut scroll = item.0;
-                    let max_scroll = (item.1.size().y - container_height).max(0.0);
-                    scroll.pos_y += touch.delta().y;
-                    scroll.pos_y = scroll.pos_y.clamp(-max_scroll, 0.);
+                    view.max_scroll = view.max_scroll.min(-(item.1.size().y - node.size().y).max(0.0));
                 }
             }
         }
@@ -161,3 +177,31 @@ fn scroll_update(mut q: Query<(&ScrollableContent, &mut Style), Changed<Scrollab
         style.top = Val::Px(scroll.pos_y);
     }
 }
+
+fn fling_update(
+    mut q_view: Query<(&mut ScrollView, &Children)>,
+    mut q_scroll: Query<&mut ScrollableContent>,
+    time: Res<Time>,
+) {
+    for (mut view, children) in q_view.iter_mut() {
+        let mut iter = q_scroll.iter_many_mut(children);
+        while let Some(mut scroll) = iter.fetch_next() {
+            if view.velocity.abs() > 16.0 {
+                let (value, velocity) = calc_velocity(scroll.pos_y, view.velocity, -4.2, time.delta_seconds());
+                view.velocity = velocity;
+                scroll.pos_y = value;
+                scroll.pos_y = scroll.pos_y.clamp(view.max_scroll, 0.);
+            } else {
+                view.velocity = 0.0;
+            }
+        }
+    }
+}
+
+fn calc_velocity(value: f32, velocity: f32, friction: f32, delta_t: f32) -> (f32, f32) {
+    (
+        value - velocity / friction + velocity / friction * (friction * delta_t).exp(),
+        velocity * (delta_t * friction).exp(),
+    )
+}
+
