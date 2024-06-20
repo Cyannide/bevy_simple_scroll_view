@@ -43,6 +43,7 @@ pub struct ScrollView {
     /// Field which control speed of the scrolling.
     /// Could be negative number to implement invert scroll
     pub scroll_speed: f32,
+    pub friction: f32,
     pub old_mouse_y: Option<f32>,
     pub velocity: f32,
     pub max_scroll: f32,
@@ -52,6 +53,7 @@ impl Default for ScrollView {
     fn default() -> Self {
         Self {
             scroll_speed: 200.0,
+            friction: 4.2,
             old_mouse_y: None,
             velocity: 0.0,
             max_scroll: 0.0,
@@ -187,7 +189,7 @@ fn fling_update(
         let mut iter = q_scroll.iter_many_mut(children);
         while let Some(mut scroll) = iter.fetch_next() {
             if view.velocity.abs() > 16.0 {
-                let (value, velocity) = calc_velocity(scroll.pos_y, view.velocity, -4.2, time.delta_seconds());
+                let (value, velocity) = calc_velocity(scroll.pos_y, view.velocity, -view.friction, time.delta_seconds());
                 view.velocity = velocity;
                 scroll.pos_y = value;
                 scroll.pos_y = scroll.pos_y.clamp(view.max_scroll, 0.);
