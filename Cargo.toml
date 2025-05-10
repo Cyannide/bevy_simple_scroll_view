@@ -1,6 +1,6 @@
 [package]
 name = "bevy_simple_scroll_view"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 exclude = [".github/", "wasm/", "record.gif"]
 categories = ["game-development", "gui"]

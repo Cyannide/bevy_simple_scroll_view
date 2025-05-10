@@ -1,9 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use bevy::{
-    input::mouse::{MouseMotion, MouseWheel},
-    prelude::*,
-};
+use bevy::{input::mouse::MouseWheel, prelude::*};
 
 /// A `Plugin` providing the systems and components required to make a ScrollView work.
 ///
@@ -30,6 +27,7 @@ impl Plugin for ScrollViewPlugin {
                     input_mouse_pressed_move,
                     input_touch_pressed_move,
                     scroll_events,
+                    fling_update,
                     scroll_update,
                 )
                     .chain(),
@@ -44,12 +42,21 @@ pub struct ScrollView {
     /// Field which control speed of the scrolling.
     /// Could be negative number to implement invert scroll
     pub scroll_speed: f32,
+    /// Amount of friction to apply to slow down the fling
+    pub friction: f32,
+    /// Tracking old mouse y coordinate to calculate new velocity
+    pub old_mouse_y: Option<f32>,
+    /// Current vertical velocity
+    pub velocity: f32,
 }
 
 impl Default for ScrollView {
     fn default() -> Self {
         Self {
             scroll_speed: 1200.0,
+            friction: 4.2,
+            old_mouse_y: None,
+            velocity: 0.0,
         }
     }
 }
@@ -131,21 +138,26 @@ pub fn create_scroll_view(mut q: Query<&mut Node, Added<ScrollView>>) {
 }
 
 fn input_mouse_pressed_move(
-    mut motion_evr: EventReader<MouseMotion>,
-    mut q: Query<(&Children, &Interaction), With<ScrollView>>,
-    mut content_q: Query<&mut ScrollableContent>,
+    mut q: Query<(&Interaction, &mut ScrollView)>,
+    windows: Query<&mut Window>,
+    time: Res<Time>,
 ) {
-    for evt in motion_evr.read() {
-        for (children, &interaction) in q.iter_mut() {
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+    if let Some(pos) = window.cursor_position() {
+        for (&interaction, mut view) in q.iter_mut() {
             if interaction != Interaction::Pressed {
+                view.old_mouse_y = None;
                 continue;
             }
-            for &child in children.iter() {
-                let Ok(mut scroll) = content_q.get_mut(child) else {
-                    continue;
-                };
-                scroll.scroll_by(evt.delta.y);
-            }
+            let delta = if let Some(old_y) = view.old_mouse_y {
+                pos.y - old_y
+            } else {
+                0.0
+            };
+            view.old_mouse_y = Some(pos.y);
+            view.velocity = (view.velocity + delta / time.delta_secs()) / 2.0;
         }
     }
 }
@@ -174,24 +186,19 @@ fn update_size(
 
 fn input_touch_pressed_move(
     touches: Res<Touches>,
-    mut q: Query<(&Children, &Interaction), With<ScrollView>>,
-    mut content_q: Query<&mut ScrollableContent>,
+    mut q: Query<(&Interaction, &mut ScrollView)>,
+    time: Res<Time>,
 ) {
     for t in touches.iter() {
         let Some(touch) = touches.get_pressed(t.id()) else {
             continue;
         };
 
-        for (children, &interaction) in q.iter_mut() {
+        for (&interaction, mut view) in q.iter_mut() {
             if interaction != Interaction::Pressed {
                 continue;
             }
-            for &child in children.iter() {
-                let Ok(mut scroll) = content_q.get_mut(child) else {
-                    continue;
-                };
-                scroll.scroll_by(touch.delta().y);
-            }
+            view.velocity = (view.velocity + touch.delta().y / time.delta_secs()) / 2.0;
         }
     }
 }
@@ -231,4 +238,35 @@ fn scroll_update(mut q: Query<(&ScrollableContent, &mut Node), Changed<Scrollabl
     for (scroll, mut style) in q.iter_mut() {
         style.top = Val::Px(scroll.pos_y);
     }
+}
+
+fn fling_update(
+    mut q_view: Query<(&mut ScrollView, &Children)>,
+    mut q_scroll: Query<&mut ScrollableContent>,
+    time: Res<Time>,
+) {
+    for (mut view, children) in q_view.iter_mut() {
+        let mut iter = q_scroll.iter_many_mut(children);
+        while let Some(mut scroll) = iter.fetch_next() {
+            if view.velocity.abs() > 16.0 {
+                let (value, velocity) = calc_velocity(
+                    scroll.pos_y,
+                    view.velocity,
+                    -view.friction,
+                    time.delta_secs(),
+                );
+                view.velocity = velocity;
+                scroll.pos_y = value.clamp(-scroll.max_scroll, 0.);
+            } else {
+                view.velocity = 0.0;
+            }
+        }
+    }
+}
+
+fn calc_velocity(value: f32, velocity: f32, friction: f32, delta_t: f32) -> (f32, f32) {
+    (
+        value - velocity / friction + velocity / friction * (friction * delta_t).exp(),
+        velocity * (delta_t * friction).exp(),
+    )
 }
